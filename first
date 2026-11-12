@@ -1,0 +1,222 @@
+
+# main.py
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import (
+    col,
+    trim,
+    upper,
+    sum as spark_sum,
+    count,
+    avg
+)
+
+# ------------------------------------------------
+# STEP 1: CREATE SPARK SESSION
+# ------------------------------------------------
+
+spark = (
+    SparkSession.builder
+    .appName("EndToEndDataEngineeringPipeline")
+    .getOrCreate()
+)
+
+spark.sparkContext.setLogLevel("WARN")
+
+
+# ------------------------------------------------
+# STEP 2: READ SOURCE DATA
+# ------------------------------------------------
+
+customers = spark.read.csv(
+    "data/customers.csv",
+    header=True,
+    inferSchema=True
+)
+
+products = spark.read.csv(
+    "data/products.csv",
+    header=True,
+    inferSchema=True
+)
+
+sales = spark.read.csv(
+    "data/sales.csv",
+    header=True,
+    inferSchema=True
+)
+
+print("CUSTOMER DATA")
+customers.show()
+
+print("PRODUCT DATA")
+products.show()
+
+print("SALES DATA")
+sales.show()
+
+
+# ------------------------------------------------
+# STEP 3: CHECK DATA SCHEMAS
+# ------------------------------------------------
+
+customers.printSchema()
+products.printSchema()
+sales.printSchema()
+
+
+# ------------------------------------------------
+# STEP 4: CLEAN CUSTOMER DATA
+# ------------------------------------------------
+
+customers_clean = (
+    customers
+    .dropDuplicates(["customer_id"])
+    .filter(col("customer_id").isNotNull())
+    .withColumn("customer_name", trim(col("customer_name")))
+    .withColumn("city", trim(col("city")))
+    .withColumn("city", upper(col("city")))
+)
+
+# Replace missing city values
+customers_clean = customers_clean.fillna({
+    "city": "UNKNOWN"
+})
+
+
+# ------------------------------------------------
+# STEP 5: CLEAN PRODUCT DATA
+# ------------------------------------------------
+
+products_clean = (
+    products
+    .dropDuplicates(["product_id"])
+    .filter(col("product_id").isNotNull())
+    .filter(col("price").isNotNull())
+    .filter(col("price") >= 0)
+    .withColumn("product_name", trim(col("product_name")))
+)
+
+
+# ------------------------------------------------
+# STEP 6: CLEAN SALES DATA
+# ------------------------------------------------
+
+sales_clean = (
+    sales
+    .dropDuplicates(["sales_id"])
+    .filter(col("sales_id").isNotNull())
+    .filter(col("customer_id").isNotNull())
+    .filter(col("product_id").isNotNull())
+    .filter(col("quantity").isNotNull())
+    .filter(col("quantity") > 0)
+)
+
+
+# ------------------------------------------------
+# STEP 7: JOIN DATASETS
+# ------------------------------------------------
+
+sales_with_customers = sales_clean.join(
+    customers_clean,
+    on="customer_id",
+    how="inner"
+)
+
+complete_sales = sales_with_customers.join(
+    products_clean,
+    on="product_id",
+    how="inner"
+)
+
+print("JOINED DATA")
+complete_sales.show()
+
+
+# ------------------------------------------------
+# STEP 8: DATA TRANSFORMATION
+# ------------------------------------------------
+
+complete_sales = complete_sales.withColumn(
+    "revenue",
+    col("quantity") * col("price")
+)
+
+print("TRANSFORMED DATA")
+complete_sales.show()
+
+
+# ------------------------------------------------
+# STEP 9: AGGREGATION
+# ------------------------------------------------
+
+customer_sales = (
+    complete_sales
+    .groupBy("customer_id", "customer_name")
+    .agg(
+        spark_sum("revenue").alias("total_revenue"),
+        count("sales_id").alias("total_orders"),
+        avg("revenue").alias("average_order_value")
+    )
+)
+
+print("CUSTOMER-WISE SALES")
+customer_sales.show()
+
+
+# ------------------------------------------------
+# STEP 10: DATA VALIDATION
+# ------------------------------------------------
+
+print("Total records:", complete_sales.count())
+
+print(
+    "Records with NULL customer IDs:",
+    complete_sales.filter(
+        col("customer_id").isNull()
+    ).count()
+)
+
+print(
+    "Records with invalid revenue:",
+    complete_sales.filter(
+        col("revenue") < 0
+    ).count()
+)
+
+
+# ------------------------------------------------
+# STEP 11: SAVE PROCESSED DATA AS DELTA
+# ------------------------------------------------
+
+(
+    complete_sales.write
+    .format("delta")
+    .mode("overwrite")
+    .save("output/delta/sales")
+)
+
+(
+    customer_sales.write
+    .format("delta")
+    .mode("overwrite")
+    .save("output/delta/customer_sales")
+)
+
+
+# ------------------------------------------------
+# STEP 12: READ DELTA DATA
+# ------------------------------------------------
+
+saved_data = (
+    spark.read
+    .format("delta")
+    .load("output/delta/sales")
+)
+
+print("FINAL DELTA DATA")
+saved_data.show()
+
+print("Pipeline completed successfully!")
+
+spark.stop()
